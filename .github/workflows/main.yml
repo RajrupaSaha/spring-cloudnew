@@ -1,0 +1,176 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: my-app
+  IMAGE_TAG: ${{ github.sha }}
+  HELM_CHART_PATH: ./helm/my-app
+  K8S_NAMESPACE: default
+  K8S_CLUSTER_NAME: my-kubernetes-cluster
+
+jobs:
+  build-application:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Go Modules Tidy
+        run: go mod tidy
+
+      - name: Build Go Application
+        run: go build -o my-app .
+
+  test-application:
+    runs-on: ubuntu-latest
+    needs: build-application
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Run Go Tests
+        run: go test ./...
+
+  security-scan-application:
+    runs-on: ubuntu-latest
+    needs: test-application
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep SAST Scan
+        uses: semgrep/action@v1
+        with:
+          config: auto
+
+  docker-build-and-push:
+    runs-on: ubuntu-latest
+    needs: security-scan-application
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+  docker-scan-image:
+    runs-on: ubuntu-latest
+    needs: docker-build-and-push
+    steps:
+      - name: Snyk Docker Vulnerability Scan
+        uses: snyk/actions/docker-3.x@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          args: --file=Dockerfile
+
+  package-helm-chart:
+    runs-on: ubuntu-latest
+    needs: docker-scan-image
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint Helm Chart
+        run: helm lint ${{ env.HELM_CHART_PATH }}
+
+      - name: Package Helm Chart
+        run: |
+          mkdir -p package-output
+          helm package ${{ env.HELM_CHART_PATH }} --destination package-output/
+
+      - name: Upload Helm Chart Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-helm-chart
+          path: package-output/*.tgz
+
+  deploy-to-kubernetes:
+    runs-on: ubuntu-latest
+    needs: package-helm-chart
+    environment:
+      name: production
+      url: https://your-app.your-domain.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Configure Kubernetes Credentials
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+
+      - name: Download Packaged Helm Chart
+        uses: actions/download-artifact@v4
+        with:
+          name: packaged-helm-chart
+          path: package-output/
+
+      - name: Deploy to Kubernetes
+        run: |
+          HELM_CHART_FILE=$(ls package-output/*.tgz)
+          helm upgrade --install \
+            ${{ env.IMAGE_NAME }} \
+            $HELM_CHART_FILE \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --set image.repository=${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ env.IMAGE_TAG }} \
+            --set ingress.enabled=true \
+            --set ingress.hosts[0].host=my-app.example.com \
+            --set ingress.hosts[0].paths[0].path=/ \
+            --wait
+
+  send-notifications:
+    runs-on: ubuntu-latest
+    needs: deploy-to-kubernetes
+    if: always()
+    steps:
+      - name: Send Slack Notification
+        uses: act10n/slack@v1
+        with:
+          status: ${{ job.status }}
+          message: |
+            CI/CD Pipeline for ${{ github.repository }} (Branch: `${{ github.ref_name }}`)
+            Status: ${{ job.status }}
+            Commit: ${{ github.sha }}
+            Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
