@@ -1,129 +1,156 @@
-stages:
-  - build
-  - test
-  - security_scan
-  - docker_build
-  - docker_scan
-  - push_image
-  - package_helm
-  - deploy
-  - notify
+name: Java App CI/CD to Kubernetes
 
-variables:
-  APP_NAME: my-java-application
-  CI_COMMIT_SHORT_SHA: ${CI_COMMIT_SHORT_SHA:-latest} # Placeholder for CI environment variable
-  CI_JOB_STATUS: ${CI_JOB_STATUS:-success} # Placeholder for CI environment variable
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: # Allows manual trigger
 
-  # Docker Registry Configuration
-  DOCKER_REGISTRY_URL: myregistry.io # e.g., myregistry.io, ghcr.io, docker.io
-  DOCKER_USERNAME: $DOCKER_USERNAME # CI/CD Secret
-  DOCKER_PASSWORD: $DOCKER_PASSWORD # CI/CD Secret
-  DOCKER_IMAGE: $DOCKER_REGISTRY_URL/$APP_NAME
-  DOCKER_TAG: $CI_COMMIT_SHORT_SHA
+env:
+  REGISTRY: ghcr.io # Or docker.io, your.private.registry.com
+  IMAGE_NAME: ${{ github.repository }} # e.g., your-org/your-repo
+  APP_NAME: java-app # Your application name, used for Helm release name
+  HELM_CHART_PATH: ./helm/java-app # Path to your Helm chart directory within the repository
 
-  # Kubernetes Deployment Configuration
-  KUBE_CONTEXT: my-kubernetes-cluster/production # Name of your Kubernetes context
-  KUBE_NAMESPACE: default # Target Kubernetes namespace
-  KUBECONFIG_BASE64: $KUBECONFIG_BASE64 # CI/CD Secret: base64 encoded kubeconfig
+jobs:
+  build-test-security:
+    name: Build, Test & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  # Helm Chart Configuration
-  HELM_CHART_PATH: ./helm/$APP_NAME # Path to your Helm chart directory
-  HELM_RELEASE_NAME: $APP_NAME
-  HELM_CHART_VERSION: 0.1.0 # Or use a dynamic version like $CI_COMMIT_SHORT_SHA
+      - name: Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven' # Cache Maven dependencies
 
-  # Notification Configuration
-  SLACK_WEBHOOK_URL: $SLACK_WEBHOOK_URL # CI/CD Secret
+      - name: Build with Maven
+        run: mvn clean install -DskipTests
 
-build_java_app:
-  stage: build
-  image: maven:3.8.6-openjdk-11 # Using OpenJDK 11 for Java build
-  script:
-    - echo "--- Building Java Application ---"
-    - mvn clean install -DskipTests # Build JAR/WAR, skip tests for now
+      - name: Run Unit Tests
+        run: mvn test
 
-run_unit_tests:
-  stage: test
-  image: maven:3.8.6-openjdk-11
-  script:
-    - echo "--- Running Unit and Integration Tests ---"
-    - mvn test # Execute tests
+      - name: Run Snyk Security Scan (SCA/SAST)
+        # Note: This step requires a SNYK_TOKEN secret configured in your repository.
+        # It scans for known vulnerabilities in your dependencies and code.
+        uses: snyk/actions/maven@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --all-projects # Scans all modules if it's a multi-module project
 
-security_scan_code:
-  stage: security_scan
-  image: owasp/dependency-check:latest # Scan for known vulnerabilities in dependencies
-  script:
-    - echo "--- Running OWASP Dependency Check ---"
-    - dependency-check.sh --project "$APP_NAME" --scan . --format HTML --out dependency-check-report --failOnCVSS 7
-  artifacts:
-    paths:
-      - dependency-check-report/dependency-check-report.html
-    when: always
+  docker-build-scan-push:
+    name: Docker Build, Scan & Push
+    runs-on: ubuntu-latest
+    needs: build-test-security # Ensures build, test, and security scan pass first
 
-docker_build_image:
-  stage: docker_build
-  image: docker:20.10.16-dind # Docker-in-Docker for building images
-  services:
-    - docker:20.10.16-dind
-  script:
-    - echo "--- Building Docker Image ---"
-    - docker build -t $DOCKER_IMAGE:$DOCKER_TAG .
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-docker_scan_image:
-  stage: docker_scan
-  image: aquasec/trivy:0.40.0 # Image vulnerability scanner
-  script:
-    - echo "--- Scanning Docker Image for Vulnerabilities ---"
-    - trivy image --exit-code 1 --severity HIGH --light $DOCKER_IMAGE:$DOCKER_TAG # Exit on HIGH severity
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }} # Uses GitHub Actions built-in token for GHCR
+          password: ${{ secrets.GITHUB_TOKEN }} # Or ${{ secrets.DOCKER_TOKEN }} for Docker Hub
 
-push_docker_image:
-  stage: push_image
-  image: docker:20.10.16-dind
-  services:
-    - docker:20.10.16-dind
-  script:
-    - echo "--- Logging into Docker Registry ---"
-    - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin $DOCKER_REGISTRY_URL
-    - echo "--- Pushing Docker Image ---"
-    - docker push $DOCKER_IMAGE:$DOCKER_TAG
+      - name: Build and Push Docker image
+        id: docker_build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile # Assuming Dockerfile is in the root of the repository
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest # Optionally push a 'latest' tag
+          build-args: |
+            JAR_FILE=target/*.jar # Assumes your build produces a JAR in target/
 
-package_helm_chart:
-  stage: package_helm
-  image: alpine/helm:3.10.0 # Helm client for packaging
-  script:
-    - echo "--- Packaging Helm Chart ---"
-    - helm package $HELM_CHART_PATH --version $HELM_CHART_VERSION --app-version $DOCKER_TAG
-  artifacts:
-    paths:
-      - $APP_NAME-$HELM_CHART_VERSION.tgz # The packaged chart tarball
+      - name: Scan Docker image with Trivy
+        # Scans the built image for vulnerabilities.
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'table'
+          exit-code: '1' # Fail the job if vulnerabilities are found
+          ignore-unfixed: true # Ignore vulnerabilities that do not have a fix available
+          severity: 'CRITICAL,HIGH' # Only report critical and high severity issues
 
-deploy_to_kubernetes:
-  stage: deploy
-  image: alpine/helm:3.10.0 # Helm client for deployment
-  script:
-    - echo "--- Configuring Kubeconfig ---"
-    - mkdir -p ~/.kube
-    - echo "$KUBECONFIG_BASE64" | base64 -d > ~/.kube/config
-    - chmod 600 ~/.kube/config
-    - export KUBECONFIG=~/.kube/config
-    - kubectl config use-context $KUBE_CONTEXT
-    - echo "--- Deploying Helm Chart to Kubernetes ---"
-    - helm upgrade --install $HELM_RELEASE_NAME $APP_NAME-$HELM_CHART_VERSION.tgz --namespace $KUBE_NAMESPACE --set image.repository=$DOCKER_IMAGE --set image.tag=$DOCKER_TAG --wait
-  dependencies:
-    - package_helm_chart # Ensure the packaged chart is available from previous stage
+  helm-packaging-deploy:
+    name: Helm Packaging & Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: docker-build-scan-push # Ensures image is built, scanned, and pushed
+    environment: production # Link to a GitHub environment for protection rules and secrets
 
-send_notifications:
-  stage: notify
-  image: alpine/curl:3.17.3 # Simple image with curl for notifications
-  script:
-    - echo "--- Sending Deployment Notifications ---"
-    - |
-      if [ "$CI_JOB_STATUS" == "success" ]; then
-        MESSAGE=" CI/CD Pipeline for *$APP_NAME* (Tag: *$DOCKER_TAG*) deployed successfully to *$KUBE_CONTEXT* in namespace *$KUBE_NAMESPACE*."
-        COLOR="#2eb886"
-      else
-        MESSAGE=" CI/CD Pipeline for *$APP_NAME* (Tag: *$DOCKER_TAG*) deployment *failed* to *$KUBE_CONTEXT* in namespace *$KUBE_NAMESPACE*."
-        COLOR="#ff0000"
-      fi
-    - |
-      curl -X POST -H 'Content-type: application/json' --data "{\"attachments\":[{\"fallback\":\"$MESSAGE\",\"color\":\"$COLOR\",\"text\":\"$MESSAGE\"}]}" "$SLACK_WEBHOOK_URL"
-  when: always # Run this job regardless of previous job's success or failure
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v1
+        with:
+          version: '3.x'
+
+      - name: Package Helm Chart
+        id: package_helm
+        run: |
+          CHART_NAME=$(basename ${{ env.HELM_CHART_PATH }})
+          # Extract chart version from Chart.yaml
+          CHART_VERSION=$(grep 'version:' ${{ env.HELM_CHART_PATH }}/Chart.yaml | awk '{print $2}')
+          # Package the chart to the current working directory
+          helm package ${{ env.HELM_CHART_PATH }} --destination .
+          echo "chart_file=${CHART_NAME}-${CHART_VERSION}.tgz" >> $GITHUB_OUTPUT # Store the generated chart filename
+
+      - name: Retrieve Kubeconfig for Kubernetes Deployment
+        # This example assumes `KUBECONFIG` secret holds your cluster's kubeconfig content.
+        # For cloud-specific clusters (EKS, GKE, AKS), consider using dedicated OIDC-based actions
+        # (e.g., google-github-actions/get-gke-credentials, aws-actions/configure-aws-credentials, azure/aks-set-context).
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy to Kubernetes with Helm
+        # This will upgrade an existing Helm release or install a new one.
+        # It uses the packaged chart file and sets image properties dynamically.
+        run: |
+          HELM_PACKAGE_NAME="${{ steps.package_helm.outputs.chart_file }}"
+          echo "Deploying Helm chart: ${HELM_PACKAGE_NAME}"
+          helm upgrade --install ${{ env.APP_NAME }} \
+            "${HELM_PACKAGE_NAME}" \
+            --namespace ${{ vars.KUBERNETES_NAMESPACE || 'default' }} \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ github.sha }} \
+            --set image.pullPolicy=Always \
+            --wait # Wait for the release to be in a ready state (pods running, etc.)
+
+  notifications:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    needs: helm-packaging-deploy # Trigger after deployment
+    if: always() # Always run this job, regardless of previous job's success/failure
+
+    steps:
+      - name: Send Slack notification
+        # Replace with your preferred notification method (e.g., Email, Teams, etc.)
+        # This action requires a SLACK_WEBHOOK_URL secret.
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_CHANNEL: '#devops-alerts' # Optional, defaults to webhook default channel
+          SLACK_COLOR: ${{ job.status == 'success' && 'good' || 'danger' }}
+          SLACK_MESSAGE: |
+            CI/CD Pipeline Run ${{ github.run_number }} (${{ github.ref_name }}) finished!
+            Status: ${{ job.status }}
+            Repository: ${{ github.repository }}
+            Commit: ${{ github.sha }}
+            Workflow: ${{ github.workflow }}
+            Link: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
