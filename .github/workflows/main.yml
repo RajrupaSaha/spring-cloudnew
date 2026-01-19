@@ -69,8 +69,8 @@ jobs:
           file: ./Dockerfile # Assuming Dockerfile is in the root of the repository
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest # Optionally push a 'latest' tag
+            ${{ env.REGISTRY }}/appimage:${{ github.sha }}
+            ${{ env.REGISTRY }}/appimage:latest # Optionally push a 'latest' tag
           build-args: |
             JAR_FILE=target/*.jar # Assumes your build produces a JAR in target/
 
