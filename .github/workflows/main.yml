@@ -10,7 +10,7 @@ on:
   workflow_dispatch: # Allows manual trigger
 
 env:
-  REGISTRY: ghcr.io # Or docker.io, your.private.registry.com
+  REGISTRY: docker.io # Or ghcr.io, your.private.registry.com
   IMAGE_NAME: ${{ github.repository }} # e.g., your-org/your-repo
   APP_NAME: java-app # Your application name, used for Helm release name
   HELM_CHART_PATH: ./helm/java-app # Path to your Helm chart directory within the repository
