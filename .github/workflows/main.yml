@@ -1,176 +1,169 @@
-name: CI/CD Pipeline
+variables:
+  # Application Name
+  APP_NAME: "java-microservice"
+  # Docker Image Name (e.g., your-registry.com/your-org/java-microservice)
+  # For GitLab CI, CI_REGISTRY_IMAGE resolves to your project's registry path.
+  APP_IMAGE_NAME: "$CI_REGISTRY_IMAGE/$APP_NAME"
+  # Docker Image Tag (e.g., commit SHA, Git tag, or semantic version)
+  APP_VERSION: "$CI_COMMIT_SHORT_SHA" # Use $CI_COMMIT_TAG for tagged releases
+  # Path to the Helm chart directory
+  HELM_CHART_PATH: "./helm-chart"
+  # Kubernetes Namespace for deployment
+  K8S_NAMESPACE: "default"
+  # Name of the Helm release
+  HELM_RELEASE_NAME: "$APP_NAME-release"
 
-on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+# Define the pipeline stages in order
+stages:
+  - build
+  - test
+  - security_scan
+  - docker_build
+  - docker_scan
+  - push_image
+  - packaging
+  - deploy
+  - notify
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: my-app
-  IMAGE_TAG: ${{ github.sha }}
-  HELM_CHART_PATH: ./helm/my-app
-  K8S_NAMESPACE: default
-  K8S_CLUSTER_NAME: my-kubernetes-cluster
+# --- Stage: Build ---
+# Builds the Java application using Maven
+build_java_app:
+  stage: build
+  image: maven:3.8.5-openjdk-17-slim # Official Maven image with Java 17
+  script:
+    - echo "--> Building Java application..."
+    - mvn clean package -DskipTests # Package the app, skipping tests (run separately)
+  artifacts:
+    paths:
+      - target/*.jar # Adjust if your application produces a .war or other artifact
+    expire_in: 1 day # Optional: define artifact retention
 
-jobs:
-  build-application:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+# --- Stage: Test ---
+# Runs unit and integration tests for the Java application
+test_java_app:
+  stage: test
+  image: maven:3.8.5-openjdk-17-slim
+  script:
+    - echo "--> Running unit and integration tests..."
+    - mvn test
+  artifacts:
+    when: always # Collect test reports even if tests fail
+    reports:
+      junit: target/surefire-reports/TEST-*.xml # Standard JUnit XML reports
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
+# --- Stage: Security Scan (SAST) ---
+# Performs Static Application Security Testing (SAST) on the Java codebase
+security_scan_sast:
+  stage: security_scan
+  image: sonarsource/sonar-scanner-cli:latest # Placeholder for SonarQube scanner
+  allow_failure: true # SAST findings might not immediately break the pipeline
+  script:
+    - echo "--> Running static application security scan (SAST)..."
+    # Example for SonarQube (requires SONAR_HOST_URL and SONAR_TOKEN as CI/CD variables)
+    - >
+      mvn verify sonar:sonar
+      -Dsonar.projectKey=$APP_NAME
+      -Dsonar.host.url=$SONAR_HOST_URL
+      -Dsonar.token=$SONAR_TOKEN
+    # Alternative for OWASP Dependency-Check (Maven plugin):
+    # - mvn org.owasp:dependency-check-maven:check
 
-      #- name: Go Modules Tidy
-       #run: go mod tidy
+# --- Stage: Docker Build ---
+# Builds the Docker image for the Java application
+docker_build_image:
+  stage: docker_build
+  image: docker:24.0.5 # Docker client image
+  services:
+    - docker:24.0.5-dind # Docker-in-Docker service for building images
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: "" # Disable TLS for dind for simplicity (use TLS in production)
+  script:
+    - echo "--> Building Docker image: $APP_IMAGE_NAME:$APP_VERSION"
+    - docker build -t $APP_IMAGE_NAME:$APP_VERSION .
 
-      - name: Build Go Application
-        run: go build -o my-app .
+# --- Stage: Docker Scan ---
+# Scans the built Docker image for known vulnerabilities
+docker_scan_image:
+  stage: docker_scan
+  image: aquasec/trivy:latest # Trivy for container image scanning
+  allow_failure: true # Image scan findings might not immediately break the pipeline
+  script:
+    - echo "--> Scanning Docker image for vulnerabilities..."
+    - trivy image --severity HIGH,CRITICAL $APP_IMAGE_NAME:$APP_VERSION
 
-  test-application:
-    runs-on: ubuntu-latest
-    needs: build-application
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+# --- Stage: Push Image ---
+# Pushes the Docker image to a container registry
+push_docker_image:
+  stage: push_image
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - echo "--> Logging into Docker registry..."
+    # For GitLab CI, CI_REGISTRY_USER/PASSWORD/REGISTRY are pre-defined
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    # For other registries, use your specific variables (e.g., DOCKER_USERNAME, DOCKER_PASSWORD, YOUR_DOCKER_REGISTRY)
+    # - docker login -u "$DOCKER_USERNAME" -p "$DOCKER_PASSWORD" "$YOUR_DOCKER_REGISTRY"
+    - echo "--> Pushing Docker image: $APP_IMAGE_NAME:$APP_VERSION"
+    - docker push $APP_IMAGE_NAME:$APP_VERSION
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
+# --- Stage: Packaging (Helm Chart) ---
+# Lints the Helm chart for correctness
+package_helm_chart:
+  stage: packaging
+  image: alpine/helm:3.12.3 # Helm client image
+  script:
+    - echo "--> Linting Helm chart..."
+    - helm lint $HELM_CHART_PATH
+    # If you need to package the chart for a Helm chart repository:
+    # - helm package $HELM_CHART_PATH
+    # - ls -l *.tgz # Verify packaged chart
 
-      - name: Run Go Tests
-        run: go test ./...
+# --- Stage: Deploy to Kubernetes ---
+# Deploys the application to Kubernetes using Helm
+deploy_to_kubernetes:
+  stage: deploy
+  image: alpine/helm:3.12.3 # Helm client image
+  before_script:
+    # Install kubectl as it's often required for Helm operations and not always in base images
+    - apk add --no-cache kubectl
+    # Ensure Kubeconfig is correctly set up in the CI/CD environment (e.g., via a secret variable)
+    # - echo "$KUBECONFIG_BASE64" | base64 -d > $HOME/.kube/config
+    # - chmod 600 $HOME/.kube/config
+  script:
+    - echo "--> Deploying to Kubernetes using Helm..."
+    - >
+      helm upgrade --install $HELM_RELEASE_NAME $HELM_CHART_PATH
+      --namespace $K8S_NAMESPACE
+      --set image.repository=$APP_IMAGE_NAME
+      --set image.tag=$APP_VERSION
+      --wait # Wait for the deployment to complete and become ready
+      --timeout 5m # Set a timeout for the deployment
 
-  security-scan-application:
-    runs-on: ubuntu-latest
-    needs: test-application
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run Semgrep SAST Scan
-        uses: semgrep/action@v1
-        with:
-          config: auto
-
-  docker-build-and-push:
-    runs-on: ubuntu-latest
-    needs: security-scan-application
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-
-  docker-scan-image:
-    runs-on: ubuntu-latest
-    needs: docker-build-and-push
-    steps:
-      - name: Snyk Docker Vulnerability Scan
-        uses: snyk/actions/docker-3.x@master
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          image: ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          args: --file=Dockerfile
-
-  package-helm-chart:
-    runs-on: ubuntu-latest
-    needs: docker-scan-image
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Helm
-        uses: azure/setup-helm@v4
-
-      - name: Lint Helm Chart
-        run: helm lint ${{ env.HELM_CHART_PATH }}
-
-      - name: Package Helm Chart
-        run: |
-          mkdir -p package-output
-          helm package ${{ env.HELM_CHART_PATH }} --destination package-output/
-
-      - name: Upload Helm Chart Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: packaged-helm-chart
-          path: package-output/*.tgz
-
-  deploy-to-kubernetes:
-    runs-on: ubuntu-latest
-    needs: package-helm-chart
-    environment:
-      name: production
-      url: https://your-app.your-domain.com
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Helm
-        uses: azure/setup-helm@v4
-
-      - name: Configure Kubernetes Credentials
-        run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
-          chmod 600 ~/.kube/config
-        env:
-          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-
-      - name: Download Packaged Helm Chart
-        uses: actions/download-artifact@v4
-        with:
-          name: packaged-helm-chart
-          path: package-output/
-
-      - name: Deploy to Kubernetes
-        run: |
-          HELM_CHART_FILE=$(ls package-output/*.tgz)
-          helm upgrade --install \
-            ${{ env.IMAGE_NAME }} \
-            $HELM_CHART_FILE \
-            --namespace ${{ env.K8S_NAMESPACE }} \
-            --set image.repository=${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }} \
-            --set image.tag=${{ env.IMAGE_TAG }} \
-            --set ingress.enabled=true \
-            --set ingress.hosts[0].host=my-app.example.com \
-            --set ingress.hosts[0].paths[0].path=/ \
-            --wait
-
-  send-notifications:
-    runs-on: ubuntu-latest
-    needs: deploy-to-kubernetes
-    if: always()
-    steps:
-      - name: Send Slack Notification
-        uses: act10n/slack@v1
-        with:
-          status: ${{ job.status }}
-          message: |
-            CI/CD Pipeline for ${{ github.repository }} (Branch: `${{ github.ref_name }}`)
-            Status: ${{ job.status }}
-            Commit: ${{ github.sha }}
-            Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+# --- Stage: Notifications ---
+# Sends a notification about the pipeline status
+send_pipeline_notification:
+  stage: notify
+  image: alpine/curl:latest # Image with curl for sending webhooks
+  # Define when this job should run (e.g., on success, on failure)
+  rules:
+    - if: $CI_PIPELINE_STATUS == "success" # For GitLab CI
+      when: on_success
+    - if: $CI_PIPELINE_STATUS == "failed" # For GitLab CI
+      when: on_failure
+  script:
+    - echo "--> Sending pipeline status notification..."
+    # Example for Slack (requires SLACK_WEBHOOK_URL as a CI/CD variable)
+    - |
+      if [ "$CI_PIPELINE_STATUS" == "success" ]; then
+        MESSAGE="✅ Pipeline for $APP_NAME (Commit: $CI_COMMIT_SHORT_SHA) succeeded!"
+      else
+        MESSAGE="❌ Pipeline for $APP_NAME (Commit: $CI_COMMIT_SHORT_SHA) failed!"
+      fi
+      curl -X POST -H 'Content-type: application/json' \
+        --data "{\"text\":\"$MESSAGE\nPipeline URL: $CI_PIPELINE_URL\"}" \
+        "$SLACK_WEBHOOK_URL"
