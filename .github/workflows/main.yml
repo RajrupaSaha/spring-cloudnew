@@ -70,7 +70,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/appimage:${{ github.sha }}
-            ${{ env.REGISTRY }}/appimage:latest # Optionally push a 'latest' tag
+            ${{ env.REGISTRY }}/appimage:latest
           build-args: |
             JAR_FILE=target/*.jar # Assumes your build produces a JAR in target/
 
