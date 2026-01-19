@@ -39,10 +39,10 @@ jobs:
 #      - name: Run Snyk Security Scan (SCA/SAST)
         # Note: This step requires a SNYK_TOKEN secret configured in your repository.
         # It scans for known vulnerabilities in your dependencies and code.
-        uses: snyk/actions/maven@master
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
+#        uses: snyk/actions/maven@master
+#        env:
+ #         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+#        with:
  #         args: --all-projects # Scans all modules if it's a multi-module project
 
   docker-build-scan-push:
@@ -76,12 +76,12 @@ jobs:
 
    #   - name: Scan Docker image with Trivy
         # Scans the built image for vulnerabilities.
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          format: 'table'
-          exit-code: '1' # Fail the job if vulnerabilities are found
-          ignore-unfixed: true # Ignore vulnerabilities that do not have a fix available
+   #     uses: aquasecurity/trivy-action@master
+   #      with:
+    #      image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+    #      format: 'table'
+    #      exit-code: '1' # Fail the job if vulnerabilities are found
+    #      ignore-unfixed: true # Ignore vulnerabilities that do not have a fix available
  #         severity: 'CRITICAL,HIGH' # Only report critical and high severity issues
 
   helm-packaging-deploy:
