@@ -6,9 +6,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.LinkedHashMap;
 import java.util.Map;
-
 import javax.sql.DataSource;
-
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cloud.app.ApplicationInstanceInfo;
