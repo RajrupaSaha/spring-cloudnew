@@ -160,9 +160,9 @@ send_pipeline_notification:
     # Example for Slack (requires SLACK_WEBHOOK_URL as a CI/CD variable)
     - |
       if [ "$CI_PIPELINE_STATUS" == "success" ]; then
-        MESSAGE="✅ Pipeline for $APP_NAME (Commit: $CI_COMMIT_SHORT_SHA) succeeded!"
+        MESSAGE="Pipeline for $APP_NAME (Commit: $CI_COMMIT_SHORT_SHA) succeeded!"
       else
-        MESSAGE="❌ Pipeline for $APP_NAME (Commit: $CI_COMMIT_SHORT_SHA) failed!"
+        MESSAGE="Pipeline for $APP_NAME (Commit: $CI_COMMIT_SHORT_SHA) failed!"
       fi
       curl -X POST -H 'Content-type: application/json' \
         --data "{\"text\":\"$MESSAGE\nPipeline URL: $CI_PIPELINE_URL\"}" \
